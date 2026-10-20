@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Walk Recorder</title>
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#0d1117">
+<link rel="icon" type="image/png" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<style>
+* { box-sizing: border-box; font-family: system-ui, sans-serif; }
+body { margin: 0; padding: 16px; background: #0d1117; color: #f0f6fc; max-width: 520px; margin-inline: auto; }
+h1 { font-size: 22px; margin: 0 0 12px; }
+input, button { width: 100%; padding: 14px; margin: 6px 0; border-radius: 12px; border: 1px solid #3a4452; font-size: 16px; background: #161b22; color: #f0f6fc; }
+button { border: none; font-weight: 600; }
+#start { background: #78ffa7; color: #0d1117; }
+#stop { background: #ca0000; }
+#mark { background: #0071e3; }
+button:disabled { opacity: 0.4; }
+.stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 12px 0; }
+.stat { background: #161b22; border-radius: 12px; padding: 10px; }
+.stat b { display: block; font-size: 20px; }
+#status { min-height: 22px; color: #a3afbd; }
+.track { background: #161b22; border-radius: 12px; padding: 10px; margin: 8px 0; }
+.track p { margin: 0 0 6px; }
+.row { display: flex; gap: 8px; }
+.row button { margin: 0; padding: 10px; }
+</style>
+</head>
+<body>
+<h1>Walk Recorder</h1>
+<input id="name" type="text" placeholder="Route name, e.g. Main Gate to Library" maxlength="60">
+<button id="start">Start recording</button>
+<button id="mark" disabled>Mark junction / place here</button>
+<button id="stop" disabled>Stop and save</button>
+<div class="stats">
+    <div class="stat">Points<b id="count">0</b></div>
+    <div class="stat">Distance<b id="dist">0 m</b></div>
+    <div class="stat">GPS accuracy<b id="acc">-</b></div>
+    <div class="stat">Marks<b id="marks">0</b></div>
+</div>
+<p id="status"></p>
+<h1>Saved routes</h1>
+<div id="list"></div>
+<script>
+const STORE = "walkRecorder.tracks";
+const MAX_ACCURACY = 25;
+const MIN_STEP = 3;
+const SIMPLIFY_METERS = 2.5;
+
+const el = (id) => document.getElementById(id);
+let watchId = null;
+let wakeLock = null;
+let points = [];
+let marks = [];
+let last = null;
+
+function load() {
+    try {
+        return JSON.parse(localStorage.getItem(STORE)) || [];
+    } catch (error) {
+        return [];
+    }
+}
+
+function save(tracks) {
+    localStorage.setItem(STORE, JSON.stringify(tracks));
+}
+
+function meters(a, b) {
+    const R = 6371000;
+    const rad = Math.PI / 180;
+    const dLat = (b.lat - a.lat) * rad;
+    const dLng = (b.lng - a.lng) * rad;
+    const x = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * rad) * Math.cos(b.lat * rad) * Math.sin(dLng / 2) ** 2;
+    return 2 * R * Math.asin(Math.sqrt(x));
+}
+
+function lineDistance(list) {
+    let total = 0;
+    for (let i = 1; i < list.length; i++) total += meters(list[i - 1], list[i]);
+    return total;
+}
+
+function pointToSegment(p, a, b) {
+    const rad = Math.PI / 180;
+    const k = Math.cos(a.lat * rad);
+    const px = (p.lng - a.lng) * k, py = p.lat - a.lat;
+    const bx = (b.lng - a.lng) * k, by = b.lat - a.lat;
+    const len = bx * bx + by * by;
+    let t = len === 0 ? 0 : (px * bx + py * by) / len;
+    t = Math.max(0, Math.min(1, t));
+    const dx = px - t * bx, dy = py - t * by;
+    return Math.sqrt(dx * dx + dy * dy) * 111320;
+}
+
+function simplify(list, tolerance) {
+    if (list.length < 3) return list.slice();
+    let index = 0;
+    let max = 0;
+    for (let i = 1; i < list.length - 1; i++) {
+        const d = pointToSegment(list[i], list[0], list[list.length - 1]);
+        if (d > max) {
+            max = d;
+            index = i;
+        }
+    }
+    if (max <= tolerance) return [list[0], list[list.length - 1]];
+    const left = simplify(list.slice(0, index + 1), tolerance);
+    const right = simplify(list.slice(index), tolerance);
+    return left.slice(0, -1).concat(right);
+}
+
+function say(text) {
+    el("status").textContent = text;
+}
+
+function refresh() {
+    el("count").textContent = String(points.length);
+    el("dist").textContent = Math.round(lineDistance(points)) + " m";
+    el("marks").textContent = String(marks.length);
+}
+
+function onPosition(position) {
+    const c = position.coords;
+    el("acc").textContent = Math.round(c.accuracy) + " m";
+    if (c.accuracy > MAX_ACCURACY) {
+        say("Waiting for a better GPS signal...");
+        return;
+    }
+    const p = { lat: c.latitude, lng: c.longitude, t: position.timestamp };
+    if (last && meters(last, p) < MIN_STEP) return;
+    points.push(p);
+    last = p;
+    say("Recording. Keep this screen open.");
+    refresh();
+}
+
+function onError(error) {
+    say("Location error: " + error.message);
+}
+
+async function keepAwake() {
+    try {
+        if ("wakeLock" in navigator) wakeLock = await navigator.wakeLock.request("screen");
+    } catch (error) {
+        wakeLock = null;
+    }
+}
+
+function start() {
+    if (!("geolocation" in navigator)) {
+        say("This browser has no location support.");
+        return;
+    }
+    points = [];
+    marks = [];
+    last = null;
+    refresh();
+    watchId = navigator.geolocation.watchPosition(onPosition, onError, { enableHighAccuracy: true, maximumAge: 0, timeout: 20000 });
+    keepAwake();
+    el("start").disabled = true;
+    el("stop").disabled = false;
+    el("mark").disabled = false;
+    say("Starting GPS...");
+}
+
+function mark() {
+    if (!last) {
+        say("No GPS point yet. Wait a few seconds.");
+        return;
+    }
+    const label = window.prompt("Name for this spot (junction, gate, building):", "");
+    if (label === null) return;
+    marks.push({ lat: last.lat, lng: last.lng, label: label.trim() });
+    if (points.length === 0 || points[points.length - 1] !== last) points.push(last);
+    refresh();
+}
+
+function stop() {
+    if (watchId !== null) navigator.geolocation.clearWatch(watchId);
+    watchId = null;
+    if (wakeLock) wakeLock.release().catch(() => {});
+    wakeLock = null;
+    el("start").disabled = false;
+    el("stop").disabled = true;
+    el("mark").disabled = true;
+    if (points.length < 2) {
+        say("Not enough points were recorded, nothing saved.");
+        return;
+    }
+    const tracks = load();
+    tracks.unshift({
+        name: el("name").value.trim() || "Route " + new Date().toLocaleString(),
+        savedAt: new Date().toISOString(),
+        raw: points,
+        line: simplify(points, SIMPLIFY_METERS),
+        marks: marks
+    });
+    save(tracks);
+    say("Saved.");
+    render();
+}
+
+function toGeoJSON(track) {
+    const features = [
+        {
+            type: "Feature",
+            properties: { kind: "route", name: track.name, meters: Math.round(lineDistance(track.line)) },
+            geometry: { type: "LineString", coordinates: track.line.map((p) => [p.lng, p.lat]) }
+        }
+    ];
+    track.marks.forEach((m) => {
+        features.push({ type: "Feature", properties: { kind: "mark", name: m.label }, geometry: { type: "Point", coordinates: [m.lng, m.lat] } });
+    });
+    return { type: "FeatureCollection", features: features };
+}
+
+function download(name, text, type) {
+    const url = URL.createObjectURL(new Blob([text], { type: type }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+}
+
+function slug(text) {
+    return text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "route";
+}
+
+function toCsv(track) {
+    const lines = ["type,name,latitude,longitude"];
+    track.line.forEach((p, i) => lines.push(`point,${i + 1},${p.lat.toFixed(6)},${p.lng.toFixed(6)}`));
+    track.marks.forEach((m) => lines.push(`mark,"${m.label.replace(/"/g, '""')}",${m.lat.toFixed(6)},${m.lng.toFixed(6)}`));
+    return lines.join("\n");
+}
+
+function render() {
+    const list = el("list");
+    list.textContent = "";
+    const tracks = load();
+    if (tracks.length === 0) {
+        list.textContent = "Nothing saved yet.";
+        return;
+    }
+    tracks.forEach((track, index) => {
+        const box = document.createElement("div");
+        box.className = "track";
+        const title = document.createElement("p");
+        title.textContent = `${track.name} - ${Math.round(lineDistance(track.line))} m, ${track.line.length} points, ${track.marks.length} marks`;
+        const row = document.createElement("div");
+        row.className = "row";
+        const buttons = [
+            ["GeoJSON", () => download(slug(track.name) + ".geojson", JSON.stringify(toGeoJSON(track), null, 2), "application/geo+json")],
+            ["CSV", () => download(slug(track.name) + ".csv", toCsv(track), "text/csv")],
+            ["Delete", () => {
+                if (!window.confirm("Delete this route?")) return;
+                const all = load();
+                all.splice(index, 1);
+                save(all);
+                render();
+            }]
+        ];
+        buttons.forEach(([label, handler]) => {
+            const b = document.createElement("button");
+            b.textContent = label;
+            b.addEventListener("click", handler);
+            row.appendChild(b);
+        });
+        box.append(title, row);
+        list.appendChild(box);
+    });
+}
+
+document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && watchId !== null) keepAwake();
+});
+
+if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+        navigator.serviceWorker.register("sw.js").catch(() => {});
+    });
+}
+
+el("start").addEventListener("click", start);
+el("stop").addEventListener("click", stop);
+el("mark").addEventListener("click", mark);
+render();
+</script>
+</body>
+</html>
