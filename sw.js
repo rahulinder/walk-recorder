@@ -1,4 +1,4 @@
-const CACHE = "walk-recorder-v1";
+const CACHE = "walk-recorder-v2";
 const FILES = ["./", "./index.html", "./manifest.webmanifest", "./icons/icon-192.png", "./icons/icon-512.png", "./icons/icon-maskable-512.png"];
 
 self.addEventListener("install", (event) => {
@@ -19,7 +19,7 @@ self.addEventListener("fetch", (event) => {
         caches.match(event.request).then((cached) => {
             const fresh = fetch(event.request)
                 .then((response) => {
-                    if (response && response.ok && new URL(event.request.url).origin === self.location.origin) {
+                    if (response && response.ok && (new URL(event.request.url).origin === self.location.origin || event.request.url.startsWith("https://unpkg.com/"))) {
                         const copy = response.clone();
                         caches.open(CACHE).then((cache) => cache.put(event.request, copy));
                     }

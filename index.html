@@ -8,6 +8,7 @@
 <meta name="theme-color" content="#0d1117">
 <link rel="icon" type="image/png" href="icons/icon-192.png">
 <link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
 <style>
 * { box-sizing: border-box; font-family: system-ui, sans-serif; }
 body { margin: 0; padding: 16px; background: #0d1117; color: #f0f6fc; max-width: 520px; margin-inline: auto; }
@@ -22,6 +23,9 @@ button:disabled { opacity: 0.4; }
 .stat { background: #161b22; border-radius: 12px; padding: 10px; }
 .stat b { display: block; font-size: 20px; }
 #status { min-height: 22px; color: #a3afbd; }
+#map { height: 340px; border-radius: 12px; margin: 8px 0; background: #161b22; color: #a3afbd; display: flex; align-items: center; justify-content: center; text-align: center; padding: 12px; }
+.map-row { display: flex; gap: 8px; }
+.map-row button { margin: 0 0 8px; padding: 10px; }
 .track { background: #161b22; border-radius: 12px; padding: 10px; margin: 8px 0; }
 .track p { margin: 0 0 6px; }
 .row { display: flex; gap: 8px; }
@@ -41,8 +45,14 @@ button:disabled { opacity: 0.4; }
     <div class="stat">Marks<b id="marks">0</b></div>
 </div>
 <p id="status"></p>
+<div id="map"></div>
+<div class="map-row">
+    <button id="layer">Switch to map view</button>
+    <button id="fit">Zoom to route</button>
+</div>
 <h1>Saved routes</h1>
 <div id="list"></div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 <script>
 const STORE = "walkRecorder.tracks";
 const MAX_ACCURACY = 25;
@@ -55,6 +65,15 @@ let wakeLock = null;
 let points = [];
 let marks = [];
 let last = null;
+let map = null;
+let satelliteLayer = null;
+let streetLayer = null;
+let liveLine = null;
+let liveDot = null;
+let liveMarks = null;
+let viewLayer = null;
+let satelliteOn = true;
+let shown = null;
 
 function load() {
     try {
@@ -112,6 +131,90 @@ function simplify(list, tolerance) {
     return left.slice(0, -1).concat(right);
 }
 
+function initMap() {
+    if (typeof L === "undefined") {
+        el("map").textContent = "The map needs an internet connection the first time you open the app.";
+        el("layer").disabled = true;
+        el("fit").disabled = true;
+        return;
+    }
+    map = L.map("map").setView([30.3566, 76.3659], 16);
+    satelliteLayer = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", { maxZoom: 19, attribution: "Tiles &copy; Esri" });
+    streetLayer = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "&copy; OpenStreetMap contributors" });
+    satelliteLayer.addTo(map);
+    liveLine = L.polyline([], { color: "#78ffa7", weight: 5 }).addTo(map);
+    liveMarks = L.layerGroup().addTo(map);
+    viewLayer = L.layerGroup().addTo(map);
+}
+
+function toggleLayer() {
+    if (!map) return;
+    satelliteOn = !satelliteOn;
+    if (satelliteOn) {
+        streetLayer.remove();
+        satelliteLayer.addTo(map);
+    } else {
+        satelliteLayer.remove();
+        streetLayer.addTo(map);
+    }
+    el("layer").textContent = satelliteOn ? "Switch to map view" : "Switch to satellite view";
+}
+
+function clearLive() {
+    if (!map) return;
+    liveLine.setLatLngs([]);
+    liveMarks.clearLayers();
+    if (liveDot) {
+        liveDot.remove();
+        liveDot = null;
+    }
+}
+
+function addMark(layer, m) {
+    const dot = L.circleMarker([m.lat, m.lng], { radius: 8, color: "#ffffff", weight: 2, fillColor: "#ff9500", fillOpacity: 1 }).addTo(layer);
+    if (m.label) dot.bindTooltip(m.label, { permanent: true, direction: "top", offset: [0, -6] });
+}
+
+function updateLive(p) {
+    if (!map) return;
+    liveLine.addLatLng([p.lat, p.lng]);
+    if (!liveDot) {
+        liveDot = L.circleMarker([p.lat, p.lng], { radius: 9, color: "#ffffff", weight: 3, fillColor: "#0071e3", fillOpacity: 1 }).addTo(map);
+    } else {
+        liveDot.setLatLng([p.lat, p.lng]);
+    }
+    if (points.length === 1) map.setView([p.lat, p.lng], 19);
+    else map.panTo([p.lat, p.lng]);
+}
+
+function showTrack(track) {
+    if (!map) return;
+    clearLive();
+    viewLayer.clearLayers();
+    shown = track;
+    const raw = track.raw.map((p) => [p.lat, p.lng]);
+    const line = track.line.map((p) => [p.lat, p.lng]);
+    L.polyline(raw, { color: "#ffffff", weight: 3, opacity: 0.5 }).addTo(viewLayer);
+    L.polyline(line, { color: "#78ffa7", weight: 5 }).addTo(viewLayer);
+    line.forEach((point) => {
+        L.circleMarker(point, { radius: 4, color: "#0d1117", weight: 1, fillColor: "#ffffff", fillOpacity: 1 }).addTo(viewLayer);
+    });
+    L.circleMarker(line[0], { radius: 9, color: "#ffffff", weight: 2, fillColor: "#2ecc71", fillOpacity: 1 }).bindTooltip("Start", { direction: "top" }).addTo(viewLayer);
+    L.circleMarker(line[line.length - 1], { radius: 9, color: "#ffffff", weight: 2, fillColor: "#ca0000", fillOpacity: 1 }).bindTooltip("End", { direction: "top" }).addTo(viewLayer);
+    track.marks.forEach((m) => addMark(viewLayer, m));
+    map.fitBounds(L.latLngBounds(raw.concat(line)), { padding: [30, 30], maxZoom: 20 });
+    el("map").scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function fitRoute() {
+    if (!map) return;
+    if (points.length > 1 && watchId !== null) {
+        map.fitBounds(L.latLngBounds(points.map((p) => [p.lat, p.lng])), { padding: [30, 30], maxZoom: 20 });
+    } else if (shown) {
+        showTrack(shown);
+    }
+}
+
 function say(text) {
     el("status").textContent = text;
 }
@@ -135,6 +238,7 @@ function onPosition(position) {
     last = p;
     say("Recording. Keep this screen open.");
     refresh();
+    updateLive(p);
 }
 
 function onError(error) {
@@ -157,6 +261,11 @@ function start() {
     points = [];
     marks = [];
     last = null;
+    shown = null;
+    if (map) {
+        viewLayer.clearLayers();
+        clearLive();
+    }
     refresh();
     watchId = navigator.geolocation.watchPosition(onPosition, onError, { enableHighAccuracy: true, maximumAge: 0, timeout: 20000 });
     keepAwake();
@@ -176,6 +285,7 @@ function mark() {
     marks.push({ lat: last.lat, lng: last.lng, label: label.trim() });
     if (points.length === 0 || points[points.length - 1] !== last) points.push(last);
     refresh();
+    if (map) addMark(liveMarks, marks[marks.length - 1]);
 }
 
 function stop() {
@@ -201,6 +311,7 @@ function stop() {
     save(tracks);
     say("Saved.");
     render();
+    showTrack(tracks[0]);
 }
 
 function toGeoJSON(track) {
@@ -255,6 +366,7 @@ function render() {
         const row = document.createElement("div");
         row.className = "row";
         const buttons = [
+            ["View", () => showTrack(track)],
             ["GeoJSON", () => download(slug(track.name) + ".geojson", JSON.stringify(toGeoJSON(track), null, 2), "application/geo+json")],
             ["CSV", () => download(slug(track.name) + ".csv", toCsv(track), "text/csv")],
             ["Delete", () => {
@@ -289,6 +401,9 @@ if ("serviceWorker" in navigator) {
 el("start").addEventListener("click", start);
 el("stop").addEventListener("click", stop);
 el("mark").addEventListener("click", mark);
+el("layer").addEventListener("click", toggleLayer);
+el("fit").addEventListener("click", fitRoute);
+initMap();
 render();
 </script>
 </body>

@@ -7,7 +7,8 @@ Record a walking route with your phone's GPS and export it as GeoJSON or CSV. On
 1. Open the site on your phone in Chrome.
 2. Menu, then Install app (or Add to Home screen).
 3. Allow location, tap Start recording, walk, tap Mark junction at turns, then Stop and save.
-4. Download the GeoJSON or CSV from the saved routes list.
+4. Watch your path on the map while you walk (satellite or map view). Tap View on a saved route to see it again with its marks, start and end.
+5. Download the GeoJSON or CSV from the saved routes list.
 
 Routes are stored on the phone only (localStorage) until you delete them.
 
